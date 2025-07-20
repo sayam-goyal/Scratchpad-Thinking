@@ -13,8 +13,6 @@ from typing import Optional
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# --- Class Definitions (from model.py) ---
-# These classes are needed to load the model structure correctly.
 
 @dataclass
 class ModelArguments:
@@ -110,19 +108,13 @@ class CODI(torch.nn.Module):
         """Helper function to get the embedding layer."""
         return get_embd(model, model_name)
 
-# --- Main Inference Logic ---
-
 def run_inference():
-    """
-    Main function to set up the model and run inference based on user input.
-    """
-    # 1. Initialize arguments based on the test_gpt2.sh script
+    
     print("Initializing arguments...")
     model_args = ModelArguments()
     data_args = DataArguments()
     training_args = TrainingArguments()
 
-    # 2. Configure LoRA
     print("Configuring LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -130,15 +122,13 @@ def run_inference():
         r=model_args.lora_r,
         lora_alpha=model_args.lora_alpha,
         lora_dropout=0.1,
-        target_modules=["c_attn", "c_proj", 'c_fc'], # Target modules for GPT-2
+        target_modules=["c_attn", "c_proj", 'c_fc'],
         init_lora_weights=True,
     )
 
-    # 3. Initialize the CODI model
     print("Initializing the CODI model...")
     model = CODI(model_args, training_args, lora_config)
 
-    # 4. Load the fine-tuned model weights (checkpoint)
     print("Loading model checkpoint...")
     ckpt_path = os.path.expanduser(model_args.ckpt_dir)
     try:
@@ -159,7 +149,6 @@ def run_inference():
     model.codi.tie_weights()
     print("Checkpoint loaded successfully.")
 
-    # 5. Initialize the tokenizer
     print("Initializing tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -168,40 +157,33 @@ def run_inference():
         use_fast=False,
     )
 
-    # Add a padding token if it doesn't exist
     if tokenizer.pad_token_id is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         tokenizer.pad_token_id = model.pad_token_id
 
-    # 6. Move model to the correct device and set to evaluation mode
     model.to(device)
     model.to(torch.bfloat16)
     model.eval()
     print("Model is ready for inference.")
 
-    # 7. Get user input
     try:
         question = input("\nPlease enter your question: ")
     except EOFError:
         print("\nNo input received. Exiting.")
         return
         
-    # 8. Prepare the input data for the model
     print("\nTokenizing input...")
     inputs = tokenizer(question, return_tensors="pt", padding="longest")
 
-    # Add the special 'beginning of turn' token
     bot_tensor = torch.tensor([model.bot_id], dtype=torch.long).expand(inputs["input_ids"].size(0), 1)
     inputs["input_ids"] = torch.cat((inputs["input_ids"], bot_tensor), dim=1)
     inputs["attention_mask"] = torch.cat((inputs["attention_mask"], torch.ones_like(bot_tensor)), dim=1)
     
-    # Move tokenized input to the device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    # 9. Run inference
     print("Generating response...")
     with torch.no_grad():
-        # Step A: Encode the question into an initial latent embedding
+        #Encode the question into an initial latent embedding
         outputs = model.codi(
             input_ids=inputs["input_ids"],
             use_cache=True,
@@ -214,7 +196,6 @@ def run_inference():
         if training_args.use_prj:
             latent_embd = model.prj(latent_embd)
 
-        # Step B: Iterate to refine the latent embedding (simulating thought)
         for _ in range(training_args.inf_latent_iterations):
             outputs = model.codi(
                 inputs_embeds=latent_embd,
@@ -227,14 +208,12 @@ def run_inference():
             if training_args.use_prj:
                 latent_embd = model.prj(latent_embd)
 
-        # Step C: Prepare for decoding by getting the 'end of turn' embedding
         eot_emb = model.get_embd(model.codi, model.model_name)(
             torch.tensor([model.eot_id], dtype=torch.long, device=device)
         ).unsqueeze(0).expand(inputs["input_ids"].size(0), -1, -1)
         
         output_emb = eot_emb
         
-        # Step D: Generate the response token by token
         pred_tokens = []
         max_new_tokens = 256
         for i in range(max_new_tokens):
@@ -247,19 +226,15 @@ def run_inference():
             # Get logits for the last token in the sequence
             logits = out.logits[:, -1, :]
 
-            # Use greedy decoding to get the most likely next token
             next_token_id = torch.argmax(logits, dim=-1).squeeze()
             
-            # Stop if the end-of-sequence token is generated
             if next_token_id.item() == tokenizer.eos_token_id:
                 break
             
             pred_tokens.append(next_token_id.item())
 
-            # Use the new token as the input for the next step
             output_emb = model.get_embd(model.codi, model.model_name)(next_token_id).unsqueeze(0).unsqueeze(0)
 
-    # 10. Decode and print the final response
     response = tokenizer.decode(pred_tokens, skip_special_tokens=True)
     print("\n--- Model Response ---")
     print(response)
