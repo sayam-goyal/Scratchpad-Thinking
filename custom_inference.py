@@ -2,17 +2,19 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import load_file
 from dataclasses import dataclass, field
 from typing import Optional
+import copy
 
 # Set the device to CUDA if available, otherwise use CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# --- Class Definitions (from model.py) ---
+# These classes are needed to load the model structure correctly.
 
 @dataclass
 class ModelArguments:
@@ -22,7 +24,6 @@ class ModelArguments:
     lora_init: bool = field(default=True)
     full_precision: bool = field(default=True)
     train: bool = field(default=False)
-    ckpt_dir: str = field(default=".")
     token: Optional[str] = field(default=None)
 
 @dataclass
@@ -108,13 +109,25 @@ class CODI(torch.nn.Module):
         """Helper function to get the embedding layer."""
         return get_embd(model, model_name)
 
+# --- Main Inference Logic ---
+
 def run_inference():
-    
+    """
+    Main function to set up the model and run inference with detailed probing.
+    """
+    # =========================================================================
+    # CHOOSE YOUR MODEL CHECKPOINT HERE
+    # =========================================================================
+    ckpt_dir = "."
+    # =========================================================================
+
+    # 1. Initialize arguments
     print("Initializing arguments...")
     model_args = ModelArguments()
     data_args = DataArguments()
     training_args = TrainingArguments()
 
+    # 2. Configure LoRA
     print("Configuring LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -126,22 +139,21 @@ def run_inference():
         init_lora_weights=True,
     )
 
+    # 3. Initialize the CODI model
     print("Initializing the CODI model...")
     model = CODI(model_args, training_args, lora_config)
 
-    print("Loading model checkpoint...")
-    ckpt_path = os.path.expanduser(model_args.ckpt_dir)
+    # 4. Load the fine-tuned model weights (checkpoint)
+    print(f"Loading model checkpoint from: {ckpt_dir}...")
+    ckpt_path = os.path.expanduser(ckpt_dir)
     try:
-        # Try loading SafeTensors first
         state_dict_path = os.path.join(ckpt_path, "model.safetensors")
         state_dict = load_file(state_dict_path)
     except FileNotFoundError:
-        # Fallback to PyTorch binary
         state_dict_path = os.path.join(ckpt_path, "pytorch_model.bin")
         state_dict = torch.load(state_dict_path, map_location=device)
     except Exception as e:
         print(f"Error: Could not find or load model checkpoint at {ckpt_path}.")
-        print(f"Please ensure the path is correct and the files 'model.safetensors' or 'pytorch_model.bin' exist.")
         print(f"Original error: {e}")
         return
 
@@ -149,6 +161,7 @@ def run_inference():
     model.codi.tie_weights()
     print("Checkpoint loaded successfully.")
 
+    # 5. Initialize the tokenizer
     print("Initializing tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -161,84 +174,202 @@ def run_inference():
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         tokenizer.pad_token_id = model.pad_token_id
 
+    # 6. Move model to device and set to eval mode
     model.to(device)
     model.to(torch.bfloat16)
     model.eval()
-    print("Model is ready for inference.")
-
-    try:
-        question = input("\nPlease enter your question: ")
-    except EOFError:
-        print("\nNo input received. Exiting.")
-        return
-        
-    print("\nTokenizing input...")
-    inputs = tokenizer(question, return_tensors="pt", padding="longest")
-
-    bot_tensor = torch.tensor([model.bot_id], dtype=torch.long).expand(inputs["input_ids"].size(0), 1)
-    inputs["input_ids"] = torch.cat((inputs["input_ids"], bot_tensor), dim=1)
-    inputs["attention_mask"] = torch.cat((inputs["attention_mask"], torch.ones_like(bot_tensor)), dim=1)
+    print("\nModel is ready for inference.")
     
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    # MODIFICATION: Start a loop for continuous question asking
+    while True:
+        # 7. Get user input
+        try:
+            question = input("\nPlease enter your question (or 'q' to quit): ")
+            if question.lower().strip() == 'q':
+                print("Exiting.")
+                break
+        except EOFError:
+            print("\nNo input received. Exiting.")
+            break
+            
+        # 8. Prepare the input data
+        print("\nTokenizing input...")
+        inputs = tokenizer(question, return_tensors="pt", padding="longest")
 
-    print("Generating response...")
-    with torch.no_grad():
-        #Encode the question into an initial latent embedding
-        outputs = model.codi(
-            input_ids=inputs["input_ids"],
-            use_cache=True,
-            output_hidden_states=True,
-            attention_mask=inputs["attention_mask"]
-        )
-        past_key_values = outputs.past_key_values
-        latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+        bot_tensor = torch.tensor([model.bot_id], dtype=torch.long).expand(inputs["input_ids"].size(0), 1)
+        inputs["input_ids"] = torch.cat((inputs["input_ids"], bot_tensor), dim=1)
+        inputs["attention_mask"] = torch.cat((inputs["attention_mask"], torch.ones_like(bot_tensor)), dim=1)
+        
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        if training_args.use_prj:
-            latent_embd = model.prj(latent_embd)
-
-        for _ in range(training_args.inf_latent_iterations):
+        # 9. Run modified inference with probing
+        print("Starting modified inference process...")
+        with torch.no_grad():
+            # A. Initial Forward Pass to process the prompt
             outputs = model.codi(
-                inputs_embeds=latent_embd,
+                input_ids=inputs["input_ids"],
                 use_cache=True,
                 output_hidden_states=True,
-                past_key_values=past_key_values
+                attention_mask=inputs["attention_mask"]
             )
-            past_key_values = outputs.past_key_values
+
+            # B. Get the initial state for the main loop
+            main_past_key_values = outputs.past_key_values
             latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
             if training_args.use_prj:
                 latent_embd = model.prj(latent_embd)
 
-        eot_emb = model.get_embd(model.codi, model.model_name)(
-            torch.tensor([model.eot_id], dtype=torch.long, device=device)
-        ).unsqueeze(0).expand(inputs["input_ids"].size(0), -1, -1)
-        
-        output_emb = eot_emb
-        
-        pred_tokens = []
-        max_new_tokens = 256
-        for i in range(max_new_tokens):
-            out = model.codi(
-                inputs_embeds=output_emb,
-                use_cache=True,
-                past_key_values=past_key_values
-            )
-            past_key_values = out.past_key_values
-            # Get logits for the last token in the sequence
-            logits = out.logits[:, -1, :]
+            # C. Helper function for printing top k tokens
+            def probe_and_print_top_k(logits, tokenizer, k=5):
+                probabilities = F.softmax(logits.to(torch.float32), dim=-1)
+                top_k_probs, top_k_ids = torch.topk(probabilities, k)
+                top_k_tokens = tokenizer.convert_ids_to_tokens(top_k_ids.squeeze())
+                print("    Top 5 candidates:")
+                for i in range(k):
+                    token_str = top_k_tokens[i].replace('Ġ', ' ')
+                    print(f"      - '{token_str}' (Probability: {(top_k_probs.squeeze()[i] * 100):.2f}%)")
 
-            next_token_id = torch.argmax(logits, dim=-1).squeeze()
+            # D. Analyze the "0th" latent thought (initial state)
+            print(f"\n--- Analyzing Initial State (Latent Thought 0) ---")
+            print("  [Probe 1/2] Projecting initial state to vocabulary space...")
+            initial_logits = outputs.logits[:, -1, :]
+            probe_and_print_top_k(initial_logits, tokenizer)
+
+            print("  [Probe 2/2] Starting temporary autoregressive generation from this state...")
+            probe_past_key_values_0 = copy.deepcopy(main_past_key_values)
+            probe_output_emb_0 = model.get_embd(model.codi, model.model_name)(
+                torch.tensor([model.eot_id], dtype=torch.long, device=device)
+            ).unsqueeze(0).expand(inputs["input_ids"].size(0), -1, -1)
+
+            max_probe_tokens = 32
+            temp_generated_tokens_0 = []
+            final_probe_outputs_0 = None
+            second_to_last_probe_outputs_0 = None
+
+            for _ in range(max_probe_tokens):
+                second_to_last_probe_outputs_0 = final_probe_outputs_0
+                probe_outputs_0 = model.codi(
+                    inputs_embeds=probe_output_emb_0,
+                    use_cache=True,
+                    past_key_values=probe_past_key_values_0
+                )
+                final_probe_outputs_0 = probe_outputs_0
+                probe_past_key_values_0 = probe_outputs_0.past_key_values
+                next_token_id_0 = torch.argmax(probe_outputs_0.logits[:, -1, :], dim=-1).squeeze()
+                if next_token_id_0.item() == tokenizer.eos_token_id:
+                    break
+                temp_generated_tokens_0.append(next_token_id_0.item())
+                probe_output_emb_0 = model.get_embd(model.codi, model.model_name)(next_token_id_0).unsqueeze(0).unsqueeze(0)
+
+            temp_response_0 = tokenizer.decode(temp_generated_tokens_0, skip_special_tokens=True)
+            print(f"    Temporarily generated answer: '{temp_response_0}'")
+            last_word_0 = temp_response_0.split()[-1] if temp_response_0 else "N/A"
+            print(f"    Top 5 candidates for the final token ('{last_word_0}'):")
+            logits_to_probe_0 = None
+            if second_to_last_probe_outputs_0 is not None:
+                logits_to_probe_0 = second_to_last_probe_outputs_0.logits[:, -1, :]
+            elif final_probe_outputs_0 is not None:
+                logits_to_probe_0 = final_probe_outputs_0.logits[:, -1, :]
+            if logits_to_probe_0 is not None:
+                probe_and_print_top_k(logits_to_probe_0, tokenizer)
+            else:
+                print("    No temporary output was generated.")
+
+
+            # E. Main Probing Loop for thoughts 1 through 6
+            for i in range(training_args.inf_latent_iterations):
+                print(f"\n--- Analyzing Latent Thought {i + 1}/{training_args.inf_latent_iterations} ---")
+
+                outputs = model.codi(
+                    inputs_embeds=latent_embd,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    past_key_values=main_past_key_values
+                )
+                main_past_key_values = outputs.past_key_values
+
+                print("  [Probe 1/2] Projecting latent thought to vocabulary space...")
+                latent_logits = outputs.logits[:, -1, :]
+                probe_and_print_top_k(latent_logits, tokenizer)
+
+                print("  [Probe 2/2] Starting temporary autoregressive generation from this state...")
+                
+                probe_past_key_values = copy.deepcopy(main_past_key_values)
+                probe_output_emb = model.get_embd(model.codi, model.model_name)(
+                    torch.tensor([model.eot_id], dtype=torch.long, device=device)
+                ).unsqueeze(0).expand(inputs["input_ids"].size(0), -1, -1)
+
+                temp_generated_tokens = []
+                final_probe_outputs = None
+                second_to_last_probe_outputs = None
+
+                for _ in range(max_probe_tokens):
+                    second_to_last_probe_outputs = final_probe_outputs
+                    probe_outputs = model.codi(
+                        inputs_embeds=probe_output_emb,
+                        use_cache=True,
+                        past_key_values=probe_past_key_values
+                    )
+                    final_probe_outputs = probe_outputs
+                    probe_past_key_values = probe_outputs.past_key_values
+                    next_token_id = torch.argmax(probe_outputs.logits[:, -1, :], dim=-1).squeeze()
+                    if next_token_id.item() == tokenizer.eos_token_id:
+                        break
+                    temp_generated_tokens.append(next_token_id.item())
+                    probe_output_emb = model.get_embd(model.codi, model.model_name)(next_token_id).unsqueeze(0).unsqueeze(0)
+
+                temp_response = tokenizer.decode(temp_generated_tokens, skip_special_tokens=True)
+                print(f"    Temporarily generated answer: '{temp_response}'")
+                last_word = temp_response.split()[-1] if temp_response else "N/A"
+                print(f"    Top 5 candidates for the final token ('{last_word}'):")
+
+                logits_to_probe = None
+                if second_to_last_probe_outputs is not None:
+                    logits_to_probe = second_to_last_probe_outputs.logits[:, -1, :]
+                elif final_probe_outputs is not None:
+                    logits_to_probe = final_probe_outputs.logits[:, -1, :]
+                
+                if logits_to_probe is not None:
+                    probe_and_print_top_k(logits_to_probe, tokenizer)
+                else:
+                    print("    No temporary output was generated.")
+
+                latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+                if training_args.use_prj:
+                    latent_embd = model.prj(latent_embd)
+
+            # F. Final Answer Generation (resumes normal process)
+            print("\n--- Latent thought process complete. Generating final response... ---")
             
-            if next_token_id.item() == tokenizer.eos_token_id:
-                break
+            eot_emb = model.get_embd(model.codi, model.model_name)(
+                torch.tensor([model.eot_id], dtype=torch.long, device=device)
+            ).unsqueeze(0).expand(inputs["input_ids"].size(0), -1, -1)
             
-            pred_tokens.append(next_token_id.item())
+            output_emb = eot_emb
+            
+            pred_tokens = []
+            max_new_tokens = 256
+            for i in range(max_new_tokens):
+                out = model.codi(
+                    inputs_embeds=output_emb,
+                    use_cache=True,
+                    past_key_values=main_past_key_values
+                )
+                main_past_key_values = out.past_key_values
+                logits = out.logits[:, -1, :]
+                next_token_id = torch.argmax(logits, dim=-1).squeeze()
+                
+                if next_token_id.item() == tokenizer.eos_token_id:
+                    break
+                
+                pred_tokens.append(next_token_id.item())
+                output_emb = model.get_embd(model.codi, model.model_name)(next_token_id).unsqueeze(0).unsqueeze(0)
 
-            output_emb = model.get_embd(model.codi, model.model_name)(next_token_id).unsqueeze(0).unsqueeze(0)
-
-    response = tokenizer.decode(pred_tokens, skip_special_tokens=True)
-    print("\n--- Model Response ---")
-    print(response)
-    print("----------------------\n")
+        # 10. Decode and print the final response
+        response = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+        print("\n--- Model Response ---")
+        print(response)
+        print("----------------------\n")
 
 
 if __name__ == "__main__":
