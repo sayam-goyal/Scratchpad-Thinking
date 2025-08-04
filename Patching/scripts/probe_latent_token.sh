@@ -1,0 +1,23 @@
+python Patching/probe_latent_token_prompt_patch_mod.py \
+	--data_name "Patching/datasets/test/gsm8k_test_original.json" \
+  	--data_name_modified "Patching/datasets/test/gsm8k_test_mod.json" \
+  	--start_patch_idx 1\
+  	--end_patch_idx 6\
+	--output_dir "$SAVE_DIR" \
+	--model_name_or_path gpt2 \
+	--seed 11 \
+	--model_max_length 512 \
+	--bf16 \
+	--lora_r 128 --lora_alpha 32 --lora_init \
+	--batch_size 2 \
+	--greedy True \
+	--num_latent 6 \
+	--use_prj True \
+	--prj_dim 768 \
+	--prj_no_ln False \
+	--prj_dropout 0.0 \
+	--inf_latent_iterations 6 \
+	--inf_num_iterations 1 \
+	--remove_eos True \
+	--use_lora True\
+	--ckpt_dir "."
