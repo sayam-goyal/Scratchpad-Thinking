@@ -1,6 +1,6 @@
-python Patching/probe_latent_token_prompt_patch_mod.py \
-	--data_name "Patching/datasets/test/gsm8k_test_original.json" \
-  	--data_name_modified "Patching/datasets/test/gsm8k_test_mod.json" \
+python probe_latent_token_prompt_patch_mod.py \
+	--data_name "datasets/test/gsm8k_test_original.json" \
+  	--data_name_modified "datasets/test/gsm8k_test_mod.json" \
   	--start_patch_idx 1\
   	--end_patch_idx 6\
 	--output_dir "$SAVE_DIR" \

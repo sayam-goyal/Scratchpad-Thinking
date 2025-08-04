@@ -233,16 +233,6 @@ class CODI(torch.nn.Module):
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             self.tokenizer.pad_token_id = self.pad_token_id
 
-        if isinstance(self.codi, PeftModel):
-            self.base_transformer_layers = self.codi.base_model.model.layers
-            # También, acceder al lm_head y al normalization layer final si existen
-            self.base_model_norm = self.codi.base_model.model.norm # Para Llama/Mistral
-            self.base_model_lm_head = self.codi.base_model.lm_head
-        else:
-            self.base_transformer_layers = self.codi.model.layers
-            self.base_model_norm = self.codi.model.norm
-            self.base_model_lm_head = self.codi.lm_head
-            
         if self.training:
             self.init()
 
