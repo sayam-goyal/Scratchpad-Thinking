@@ -72,7 +72,7 @@ class PatchingArguments:
     data_name_modified: Optional[str] = field(default=None, metadata={"help": "Path to the modified dataset for patching. Required if patch_latent_idx is set."})
     start_patch_idx: int = field(default=0, metadata={"help": "Starting index for iterative patching."})
     end_patch_idx: int = field(default=10, metadata={"help": "Ending index (exclusive) for iterative patching."})
-
+    
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
