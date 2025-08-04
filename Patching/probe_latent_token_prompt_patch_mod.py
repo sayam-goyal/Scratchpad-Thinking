@@ -556,14 +556,14 @@ def evaluation(model_args, data_args, training_args, patching_args, current_patc
     print(f"adapter: {model_args.adapter_name_or_path} | Original GSM8K test accuracy: {100*accuracy_original:.2f}% | ")
     print(f"average length of COT (Original): {sum(len_cot_original)/len(len_cot_original)}")
 
-    with open(f"decoded_latent_original_patch_{current_patch_idx}.txt", "w") as f:
+    with open(f"outputs/decoded_latent_original_patch_{current_patch_idx}.txt", "w") as f:
         f.write("\n".join(log_original))
 
     if current_patch_idx!= -1:
         accuracy_modified = compute_accuracy(answer_modified, ans_pred_list_modified)
         print(f"adapter: {model_args.adapter_name_or_path} | Modified GSM8K test accuracy (after patching): {100*accuracy_modified:.2f}% | ")
         print(f"average length of COT (Modified after patching): {sum(len_cot_modified)/len(len_cot_modified)}")
-        with open(f"decoded_latent_modified_patch_{current_patch_idx}.txt", "w") as f:
+        with open(f"outputs/decoded_latent_modified_patch_{current_patch_idx}.txt", "w") as f:
             f.write("\n".join(log_modified))
 
     return 100*accuracy_original, (100*accuracy_modified if current_patch_idx != -1 else None)
