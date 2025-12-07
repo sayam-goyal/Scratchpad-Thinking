@@ -2,7 +2,7 @@
 
 This repository contains the code and data for the paper "Scratchpad Thinking: Alternation Between Storage and Computation in Latent Reasoning Models".
 
-OpenReview: [https://openreview.net/forum?id=EV30qkZXrR](url)
+OpenReview: [https://openreview.net/forum?id=EV30qkZXrR](https://openreview.net/forum?id=EV30qkZXrR)
 
 ## Abstract
 
